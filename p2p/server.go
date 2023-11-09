@@ -10,6 +10,12 @@ type Peer struct {
 	conn       net.Conn
 	listenAddr string
 }
+
+func (p *Peer) Send(data []byte) error {
+	_, err := p.conn.Write(data)
+	return err
+}
+
 type ServerConfig struct {
 	ListenAddr string
 }
@@ -56,6 +62,12 @@ func (s *Server) acceptLoop() {
 		if err != nil {
 			panic(err)
 		}
+		peer := &Peer{
+			conn:       conn,
+			listenAddr: conn.RemoteAddr().String(),
+		}
+		peer.Send([]byte("Hello from server\n"))
+		s.addPeer <- peer
 		go s.handleConn(conn)
 	}
 }
