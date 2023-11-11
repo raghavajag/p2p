@@ -2,9 +2,16 @@ package p2p
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 )
+
+type Message struct {
+	From    net.Addr
+	Payload io.Reader
+}
 
 type Peer struct {
 	conn       net.Conn
@@ -20,10 +27,12 @@ type ServerConfig struct {
 	ListenAddr string
 }
 type Server struct {
+	handler  Handler
 	peers    map[string]*Peer
 	listener net.Listener
 	ServerConfig
 	addPeer chan *Peer
+	msgCh   chan *Message
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -31,6 +40,8 @@ func NewServer(cfg ServerConfig) *Server {
 		peers:        make(map[string]*Peer),
 		ServerConfig: cfg,
 		addPeer:      make(chan *Peer),
+		msgCh:        make(chan *Message),
+		handler:      &DefaultHandler{},
 	}
 }
 
@@ -49,7 +60,11 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	for scanner.Scan() {
 		receivedData := scanner.Text()
-		fmt.Printf("Received: %s\n", receivedData)
+
+		s.msgCh <- &Message{
+			From:    conn.RemoteAddr(),
+			Payload: bytes.NewReader([]byte(receivedData)),
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -66,8 +81,8 @@ func (s *Server) acceptLoop() {
 			conn:       conn,
 			listenAddr: conn.RemoteAddr().String(),
 		}
-		peer.Send([]byte("Hello from server\n"))
 		s.addPeer <- peer
+		peer.Send([]byte("Hello from server\n"))
 		go s.handleConn(conn)
 	}
 }
@@ -85,6 +100,10 @@ func (s *Server) loop() {
 		case peer := <-s.addPeer:
 			s.peers[peer.listenAddr] = peer
 			fmt.Printf("Peer %s connected\n", peer.listenAddr)
+		case msg := <-s.msgCh:
+			if err := s.handler.HandleMessage(msg); err != nil {
+				panic(err)
+			}
 		}
 	}
 }
