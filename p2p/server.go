@@ -31,8 +31,9 @@ type Server struct {
 	peers    map[string]*Peer
 	listener net.Listener
 	ServerConfig
-	addPeer chan *Peer
-	msgCh   chan *Message
+	addPeer    chan *Peer
+	removePeer chan *Peer
+	msgCh      chan *Message
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -42,6 +43,7 @@ func NewServer(cfg ServerConfig) *Server {
 		addPeer:      make(chan *Peer),
 		msgCh:        make(chan *Message),
 		handler:      &DefaultHandler{},
+		removePeer:   make(chan *Peer),
 	}
 }
 
@@ -53,23 +55,22 @@ func (s *Server) Start() {
 	fmt.Printf("Listening on %s\n", s.ListenAddr)
 	s.acceptLoop()
 }
-func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
-
-	scanner := bufio.NewScanner(conn)
+func (s *Server) handleConn(p *Peer) {
+	scanner := bufio.NewScanner(p.conn)
 
 	for scanner.Scan() {
 		receivedData := scanner.Text()
 
 		s.msgCh <- &Message{
-			From:    conn.RemoteAddr(),
+			From:    p.conn.RemoteAddr(),
 			Payload: bytes.NewReader([]byte(receivedData)),
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading from %s: %s\n", conn.RemoteAddr(), err)
+		fmt.Printf("Error reading from %s: %s\n", p.conn.RemoteAddr(), err)
 	}
+	s.removePeer <- p
 }
 func (s *Server) acceptLoop() {
 	for {
@@ -83,7 +84,7 @@ func (s *Server) acceptLoop() {
 		}
 		s.addPeer <- peer
 		peer.Send([]byte("Hello from server\n"))
-		go s.handleConn(conn)
+		go s.handleConn(peer)
 	}
 }
 func (s *Server) listen() error {
@@ -94,9 +95,26 @@ func (s *Server) listen() error {
 	s.listener = ln
 	return nil
 }
+func (s *Server) Connect(addr string) error {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	peer := &Peer{
+		conn:       conn,
+		listenAddr: conn.RemoteAddr().String(),
+	}
+	s.addPeer <- peer
+	return nil
+}
+
 func (s *Server) loop() {
 	for {
 		select {
+		case peer := <-s.removePeer:
+			addr := peer.listenAddr
+			delete(s.peers, addr)
+			fmt.Printf("Peer %s disconnected\n", addr)
 		case peer := <-s.addPeer:
 			s.peers[peer.listenAddr] = peer
 			fmt.Printf("Peer %s connected\n", peer.listenAddr)
