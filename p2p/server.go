@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+
+	"github.com/sirupsen/logrus"
 )
 
 type Message struct {
@@ -27,17 +29,17 @@ type ServerConfig struct {
 	ListenAddr string
 }
 type Server struct {
-	handler  Handler
-	peers    map[string]*Peer
-	listener net.Listener
+	handler Handler
+	peers   map[string]*Peer
 	ServerConfig
 	addPeer    chan *Peer
 	removePeer chan *Peer
 	msgCh      chan *Message
+	transport  *TCPTransport
 }
 
 func NewServer(cfg ServerConfig) *Server {
-	return &Server{
+	s := &Server{
 		peers:        make(map[string]*Peer),
 		ServerConfig: cfg,
 		addPeer:      make(chan *Peer),
@@ -45,15 +47,20 @@ func NewServer(cfg ServerConfig) *Server {
 		handler:      &DefaultHandler{},
 		removePeer:   make(chan *Peer),
 	}
+	tr := NewTCPTransport(s.ListenAddr)
+	s.transport = tr
+	tr.AddPeer = s.addPeer
+	tr.RemovePeer = s.removePeer
+	return s
 }
 
 func (s *Server) Start() {
 	go s.loop()
-	if err := s.listen(); err != nil {
-		panic(err)
-	}
-	fmt.Printf("Listening on %s\n", s.ListenAddr)
-	s.acceptLoop()
+	logrus.WithFields(logrus.Fields{
+		"addr": s.ListenAddr,
+	}).Info("server started")
+
+	s.transport.ListenAndAccept()
 }
 func (s *Server) handleConn(p *Peer) {
 	scanner := bufio.NewScanner(p.conn)
@@ -72,29 +79,6 @@ func (s *Server) handleConn(p *Peer) {
 	}
 	s.removePeer <- p
 }
-func (s *Server) acceptLoop() {
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			panic(err)
-		}
-		peer := &Peer{
-			conn:       conn,
-			listenAddr: conn.RemoteAddr().String(),
-		}
-		s.addPeer <- peer
-		peer.Send([]byte("Hello from server\n"))
-		go s.handleConn(peer)
-	}
-}
-func (s *Server) listen() error {
-	ln, err := net.Listen("tcp", s.ListenAddr)
-	if err != nil {
-		return err
-	}
-	s.listener = ln
-	return nil
-}
 func (s *Server) Connect(addr string) error {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -112,12 +96,16 @@ func (s *Server) loop() {
 	for {
 		select {
 		case peer := <-s.removePeer:
+			logrus.WithFields(logrus.Fields{
+				"addr": peer.listenAddr,
+			}).Info("player disconnected")
 			addr := peer.listenAddr
 			delete(s.peers, addr)
-			fmt.Printf("Peer %s disconnected\n", addr)
 		case peer := <-s.addPeer:
+			logrus.WithFields(logrus.Fields{
+				"addr": peer.listenAddr,
+			}).Info("player connected")
 			s.peers[peer.listenAddr] = peer
-			fmt.Printf("Peer %s connected\n", peer.listenAddr)
 		case msg := <-s.msgCh:
 			if err := s.handler.HandleMessage(msg); err != nil {
 				panic(err)
